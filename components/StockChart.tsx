@@ -13,10 +13,10 @@ import {
   ReferenceLine,
   ReferenceArea
 } from 'recharts';
-import { DataPoint, TradeSignal, SignalType, Forecast } from '../types';
+import { DataPoint, TradeSignal, SignalType, Forecast, ChartDataPoint } from '../types';
 
 interface Props {
-  data: DataPoint[];
+  data: ChartDataPoint[]; // Update to accept data where price might be null
   signals: TradeSignal[];
   forecast?: Forecast | null;
   activeTrade?: Partial<TradeSignal> | null; // Pass active trade to visualize SL/TP
@@ -27,20 +27,27 @@ const StockChart: React.FC<Props> = ({ data, signals, forecast, activeTrade, ful
   
   const CustomTooltip = ({ active, payload, label }: any) => {
     if (active && payload && payload.length) {
-      const dataPoint = payload[0].payload as DataPoint;
+      const dataPoint = payload[0].payload as ChartDataPoint;
       const forecastVal = dataPoint.predictionForFuture;
       const historicPred = dataPoint.predictedPrice;
 
       // Format timestamp for label
       const timeLabel = new Date(dataPoint.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      const isFuture = dataPoint.price === null;
 
       return (
         <div className="bg-gray-850 border border-gray-700 p-3 rounded shadow-xl z-50 min-w-[200px]">
-          <p className="text-gray-300 font-bold mb-2 border-b border-gray-700 pb-1">{timeLabel}</p>
+          <p className="text-gray-300 font-bold mb-2 border-b border-gray-700 pb-1 flex justify-between">
+             {timeLabel}
+             {isFuture && <span className="text-xs text-purple-400 bg-purple-900/30 px-1 rounded ml-2">FUTURE</span>}
+          </p>
           
           {payload.map((entry: any, index: number) => {
             let name = entry.name;
             if (name === 'Forecast') return null; 
+            // Don't show "Actual Price: null"
+            if (name === 'Actual Price' && entry.value === undefined) return null;
+
             return (
               <div key={index} className="flex items-center justify-between gap-4 mb-1">
                 <div className="flex items-center gap-2">
@@ -57,7 +64,7 @@ const StockChart: React.FC<Props> = ({ data, signals, forecast, activeTrade, ful
           })}
 
           {/* Historic Accuracy (if both exist) */}
-          {historicPred && (
+          {historicPred && dataPoint.price !== null && (
              <div className="mt-1 pt-1 border-t border-gray-700/50">
                <div className="flex justify-between items-center text-xs">
                  <span className="text-gray-500">Prediction Error:</span>
@@ -132,8 +139,10 @@ const StockChart: React.FC<Props> = ({ data, signals, forecast, activeTrade, ful
 
   const { start, end, ticks } = getDayBounds();
 
-  // Calculate Y-Domain padding
-  const yValues = data.map(d => d.price);
+  // Calculate Y-Domain padding - Ignore null prices for domain calculation
+  const yValues = data
+    .map(d => d.price)
+    .filter((p): p is number => p !== null && !isNaN(p));
   
   // Include predictedPrice in domain calculation so the line isn't cut off
   data.forEach(d => {
@@ -210,7 +219,7 @@ const StockChart: React.FC<Props> = ({ data, signals, forecast, activeTrade, ful
             strokeWidth={2.5}
             strokeDasharray="4 4"
             dot={false}
-            connectNulls
+            connectNulls={true}
             isAnimationActive={false}
           />
 

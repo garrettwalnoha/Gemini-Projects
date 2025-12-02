@@ -2,7 +2,7 @@
 import React, { useEffect, useState, useRef } from 'react';
 import { generateMarketData, runPredictionAlgorithm, trainModel } from './services/marketSimulator';
 import { getGeminiAnalysis } from './services/geminiService';
-import { DataPoint, TradeSignal, MarketAnalysis, PlaybackSpeed, Forecast, TradeRejection } from './types';
+import { DataPoint, TradeSignal, MarketAnalysis, PlaybackSpeed, Forecast, TradeRejection, ChartDataPoint } from './types';
 import StockChart from './components/StockChart';
 import MetricsDashboard from './components/MetricsDashboard';
 import SignalLog from './components/SignalLog';
@@ -31,7 +31,26 @@ const App: React.FC = () => {
   const [isLoadingAi, setIsLoadingAi] = useState<boolean>(false);
 
   // --- Derived State for UI ---
+  // This is the data "revealed" so far for logic and stats
   const visibleData = fullDayData.slice(0, playbackIndex + 1);
+
+  // This is the data for the chart: Includes historical + 15 mins of FUTURE data (with masked prices)
+  const chartData: ChartDataPoint[] = React.useMemo(() => {
+    if (fullDayData.length === 0) return [];
+
+    // Current data (valid prices)
+    const current = visibleData.map(d => ({ ...d })); 
+    
+    // Future data (masked prices) - Show next 15 minutes to visualize the model's prediction line
+    const futureLimit = Math.min(fullDayData.length, playbackIndex + 1 + 15);
+    const future = fullDayData.slice(playbackIndex + 1, futureLimit).map(d => ({
+        ...d,
+        price: null, // Mask actual price so user can't see the future
+        open: 0, high: 0, low: 0
+    }));
+    
+    return [...current, ...future];
+  }, [visibleData, fullDayData, playbackIndex]);
   
   const visibleSignals = fullDaySignals.filter(s => {
     const signalIndex = fullDayData.findIndex(d => d.timestamp === s.timestamp);
@@ -244,7 +263,7 @@ const App: React.FC = () => {
           
           <div className="lg:col-span-2 space-y-6">
             <StockChart 
-              data={visibleData} 
+              data={chartData} 
               signals={visibleSignals} 
               forecast={currentForecast}
               activeTrade={currentActiveTrade}

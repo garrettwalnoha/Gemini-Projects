@@ -16,6 +16,11 @@ export interface DataPoint {
   parkinsonVolatility?: number; // High-Low range based volatility
 }
 
+// Chart-specific type where price can be null (for future visualization)
+export interface ChartDataPoint extends Omit<DataPoint, 'price'> {
+  price: number | null;
+}
+
 export enum SignalType {
   BUY = 'BUY',
   SELL = 'SELL',
