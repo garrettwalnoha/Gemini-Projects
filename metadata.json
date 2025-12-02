@@ -1,0 +1,5 @@
+{
+  "name": "SPY tracker Gemini",
+  "description": "A predictive analytics dashboard for SPY ETF using weighted historical data to forecast 15-minute price movements and generate trading signals.",
+  "requestFramePermissions": []
+}
