@@ -1,6 +1,10 @@
 
 import { DataPoint } from '../types';
 
+function randomRange(min: number, max: number): number {
+    return min + Math.random() * (max - min);
+}
+
 // Real SPY 1-minute close prices for May 1, 2024 (High resolution sample)
 const SPY_MAY_01_2024_DELTAS = [
   501.98, -0.15, 0.08, -0.12, -0.05, 0.12, 0.09, -0.22, -0.11, 0.05,
@@ -126,7 +130,8 @@ function generateIntradayFromDaily(dateStr: string, ohlc: { o: number, h: number
     const trendPull = (trendTarget - currentPrice) * (progress * progress * 0.05);
     
     // 2. Volatility Component
-    let volatility = (ohlc.h - ohlc.l) / 80; 
+    // Increased denominator from 80 to 30 to increase intraday noise (simulating realistic market texture)
+    let volatility = (ohlc.h - ohlc.l) / 30; 
     const noise = (Math.random() - 0.5) * volatility;
     
     currentPrice += trendPull + noise;
@@ -143,9 +148,9 @@ function generateIntradayFromDaily(dateStr: string, ohlc: { o: number, h: number
       time: new Date(timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
       timestamp: timestamp,
       price: parseFloat(currentPrice.toFixed(2)),
-      open: currentPrice,
-      high: currentPrice, 
-      low: currentPrice
+      open: 0, 
+      high: 0, 
+      low: 0 // Initialize to 0 for later enrichment
     });
   }
   
@@ -183,7 +188,46 @@ export const getRealDataForDate = (dateStr: string): DataPoint[] | null => {
   
   // 2. Daily History Lookup (2024 & 2025)
   if (ALL_HISTORY[dateStr]) {
-    return generateIntradayFromDaily(dateStr, ALL_HISTORY[dateStr]);
+    let rawData = generateIntradayFromDaily(dateStr, ALL_HISTORY[dateStr]);
+
+    // FIX: Synthesize realistic OHLCV for the minute bars to enable volatility calculations
+    return rawData.map((point, index) => {
+        // If it's the first point, initialize OHLC
+        if (index === 0) {
+            return { 
+                ...point, 
+                open: point.price, 
+                high: point.price, 
+                low: point.price,
+                volume: Math.floor(randomRange(10000, 50000))
+            };
+        }
+
+        const prev = rawData[index - 1];
+        const open = prev.price; // The open of this bar is the close of the previous bar
+        
+        // Synthesize High/Low: Add noise around the price movement
+        const volatilityNoise = randomRange(0.02, 0.15); 
+        const maxVal = Math.max(open, point.price);
+        const minVal = Math.min(open, point.price);
+        
+        // High must be at least the max of Open/Close, plus a small wick
+        const high = parseFloat((maxVal + randomRange(0, volatilityNoise)).toFixed(2));
+        // Low must be at most the min of Open/Close, minus a small wick
+        const low = parseFloat((minVal - randomRange(0, volatilityNoise)).toFixed(2));
+        
+        // Synthesize Volume (Simple version)
+        const priceChange = Math.abs(point.price - prev.price);
+        const volume = Math.floor(20000 + (priceChange * 80000) + randomRange(-5000, 5000));
+
+        return {
+            ...point,
+            open,
+            high,
+            low,
+            volume: volume > 1000 ? volume : 1000
+        };
+    });
   }
   
   return null;

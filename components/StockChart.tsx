@@ -31,9 +31,12 @@ const StockChart: React.FC<Props> = ({ data, signals, forecast, activeTrade, ful
       const forecastVal = dataPoint.predictionForFuture;
       const historicPred = dataPoint.predictedPrice;
 
+      // Format timestamp for label
+      const timeLabel = new Date(dataPoint.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
       return (
         <div className="bg-gray-850 border border-gray-700 p-3 rounded shadow-xl z-50 min-w-[200px]">
-          <p className="text-gray-300 font-bold mb-2 border-b border-gray-700 pb-1">{label}</p>
+          <p className="text-gray-300 font-bold mb-2 border-b border-gray-700 pb-1">{timeLabel}</p>
           
           {payload.map((entry: any, index: number) => {
             let name = entry.name;
@@ -42,7 +45,7 @@ const StockChart: React.FC<Props> = ({ data, signals, forecast, activeTrade, ful
               <div key={index} className="flex items-center justify-between gap-4 mb-1">
                 <div className="flex items-center gap-2">
                    {entry.name === 'Model Prediction' ? (
-                     <div className="w-4 h-0.5 bg-purple-500 border-t border-dashed border-white" />
+                     <div className="w-4 h-0.5 bg-[#d946ef] border-t border-dashed border-white" />
                    ) : (
                      <div className="w-3 h-3 rounded-full" style={{ backgroundColor: entry.color }} />
                    )}
@@ -105,17 +108,48 @@ const StockChart: React.FC<Props> = ({ data, signals, forecast, activeTrade, ful
     return null;
   };
 
-  const generateStaticTicks = () => {
-     return ['09:30', '10:30', '11:30', '12:30', '13:30', '14:30', '15:30', '16:00'];
-  };
+  // Generate hourly ticks based on the actual date of the data
+  const getDayBounds = () => {
+    if (data.length === 0) return { start: 0, end: 0, ticks: [] };
+    const first = new Date(data[0].timestamp);
+    const start = new Date(first);
+    start.setHours(9, 30, 0, 0);
+    const end = new Date(first);
+    end.setHours(16, 0, 0, 0);
+    
+    const ticks = [];
+    let current = new Date(start);
+    // Add ticks for every hour from 9:30 to 16:00
+    while (current <= end) {
+      ticks.push(current.getTime());
+      current.setMinutes(current.getMinutes() + 60); 
+    }
+    // Ensure 9:30 and 16:00 are explicitly included if logic skipped them
+    if (ticks[0] !== start.getTime()) ticks.unshift(start.getTime());
+    
+    return { start: start.getTime(), end: end.getTime(), ticks };
+  }
+
+  const { start, end, ticks } = getDayBounds();
 
   // Calculate Y-Domain padding
   const yValues = data.map(d => d.price);
+  
+  // Include predictedPrice in domain calculation so the line isn't cut off
+  data.forEach(d => {
+      if (d.predictedPrice !== undefined && !isNaN(d.predictedPrice)) {
+          yValues.push(d.predictedPrice);
+      }
+  });
+
   if (forecast) yValues.push(forecast.endPrice);
+  
   const minP = Math.min(...yValues);
   const maxP = Math.max(...yValues);
   const range = maxP - minP;
-  const domain: [number, number] = [minP - range * 0.1, maxP + range * 0.1];
+  // Ensure we have a valid range even if flat
+  const safeRange = range === 0 ? maxP * 0.01 : range;
+  const yDomain: [number, number] = [minP - safeRange * 0.1, maxP + safeRange * 0.1];
 
   return (
     <div className="w-full h-[400px] bg-gray-900/50 rounded-xl border border-gray-800 p-4 relative">
@@ -134,18 +168,22 @@ const StockChart: React.FC<Props> = ({ data, signals, forecast, activeTrade, ful
           <CartesianGrid strokeDasharray="3 3" stroke="#2d3748" vertical={false} />
           
           <XAxis 
-            dataKey="time" 
+            dataKey="timestamp" 
+            type="number"
+            domain={fullDayDomain ? [start, end] : ['auto', 'auto']}
+            ticks={fullDayDomain ? ticks : undefined}
+            tickFormatter={(unixTime) => new Date(unixTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
             stroke="#718096" 
             tick={{ fill: '#718096', fontSize: 12 }} 
-            interval="preserveStartEnd"
-            ticks={fullDayDomain ? generateStaticTicks() : undefined}
+            interval={0} // Force all provided ticks to render
           />
           
           <YAxis 
-            domain={domain} 
+            domain={yDomain} 
             stroke="#718096" 
             tick={{ fill: '#718096', fontSize: 12 }} 
             width={50}
+            allowDataOverflow={false} 
           />
           
           <Tooltip content={<CustomTooltip />} />
@@ -168,38 +206,26 @@ const StockChart: React.FC<Props> = ({ data, signals, forecast, activeTrade, ful
             type="monotone"
             dataKey="predictedPrice"
             name="Model Prediction"
-            stroke="#a855f7"
-            strokeWidth={2}
-            strokeDasharray="5 5"
+            stroke="#d946ef" 
+            strokeWidth={2.5}
+            strokeDasharray="4 4"
             dot={false}
             connectNulls
             isAnimationActive={false}
           />
 
-          {/* Live Forecast Vector - Visualized clearly as requested */}
-          {forecast && (
+          {/* Live Forecast Vector */}
+          {forecast && forecast.startTimestamp && forecast.endTimestamp && (
             <ReferenceLine
               segment={[
-                { x: forecast.startTime, y: forecast.startPrice },
-                { x: forecast.endTime, y: forecast.endPrice }
+                { x: forecast.startTimestamp, y: forecast.startPrice },
+                { x: forecast.endTimestamp, y: forecast.endPrice }
               ]}
-              stroke="#a855f7"
-              strokeWidth={3}
-              strokeDasharray="4 4"
+              stroke="#d946ef"
+              strokeWidth={2}
+              strokeDasharray="3 3"
               ifOverflow="extendDomain"
             />
-          )}
-          
-          {/* Dot at end of forecast */}
-          {forecast && (
-             <ReferenceDot
-               x={forecast.endTime}
-               y={forecast.endPrice}
-               r={5}
-               fill="#a855f7"
-               stroke="white"
-               strokeWidth={2}
-             />
           )}
           
           {/* Active Trade Stop Loss & Take Profit Visualization */}
@@ -224,7 +250,7 @@ const StockChart: React.FC<Props> = ({ data, signals, forecast, activeTrade, ful
           {signals.map((signal) => (
              <ReferenceDot
                key={signal.id}
-               x={signal.time}
+               x={signal.timestamp} // Use timestamp for x coordinate
                y={signal.priceAtSignal}
                r={5}
                fill={signal.type === SignalType.BUY ? '#00c805' : '#ff3b30'}

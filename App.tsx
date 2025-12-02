@@ -2,7 +2,7 @@
 import React, { useEffect, useState, useRef } from 'react';
 import { generateMarketData, runPredictionAlgorithm, trainModel } from './services/marketSimulator';
 import { getGeminiAnalysis } from './services/geminiService';
-import { DataPoint, TradeSignal, MarketAnalysis, PlaybackSpeed, Forecast } from './types';
+import { DataPoint, TradeSignal, MarketAnalysis, PlaybackSpeed, Forecast, TradeRejection } from './types';
 import StockChart from './components/StockChart';
 import MetricsDashboard from './components/MetricsDashboard';
 import SignalLog from './components/SignalLog';
@@ -13,6 +13,7 @@ const App: React.FC = () => {
   // --- Data State ---
   const [fullDayData, setFullDayData] = useState<DataPoint[]>([]);
   const [fullDaySignals, setFullDaySignals] = useState<TradeSignal[]>([]);
+  const [fullDayRejections, setFullDayRejections] = useState<TradeRejection[]>([]);
   const [fullDayStats, setFullDayStats] = useState<MarketAnalysis | null>(null);
   
   // Model Training State
@@ -34,26 +35,22 @@ const App: React.FC = () => {
   
   const visibleSignals = fullDaySignals.filter(s => {
     const signalIndex = fullDayData.findIndex(d => d.timestamp === s.timestamp);
-    // Include signal if it happened at or before current playback time
-    // Also include signals that started before but closed AFTER (they should appear as open/closed accordingly?)
-    // Actually, StockChart just plots the entry dots.
     return signalIndex !== -1 && signalIndex <= playbackIndex;
+  });
+
+  const visibleRejections = fullDayRejections.filter(r => {
+      const rejIndex = fullDayData.findIndex(d => d.timestamp === r.timestamp);
+      return rejIndex !== -1 && rejIndex <= playbackIndex;
   });
 
   // Identify if there is currently an ACTIVE trade at this playback moment
   const currentActiveTrade = React.useMemo(() => {
     // Find a signal that started before current time but hasn't "closed" yet in the playback timeline
-    // OR find the latest open signal if we were simulating live. 
-    // Since we have the full list of "Closed" signals from the algo, we look for one where:
-    // entryTime <= currentTime AND exitTime > currentTime
     const currentTimestamp = visibleData[visibleData.length - 1]?.timestamp;
     if (!currentTimestamp) return null;
 
     return fullDaySignals.find(s => {
-       const entryIndex = fullDayData.findIndex(d => d.timestamp === s.timestamp);
-       // We can approximate duration check using timestamp
        const exitTimestamp = fullDayData.find(d => d.time === s.exitTime)?.timestamp;
-       
        if (!exitTimestamp) return false;
        return s.timestamp <= currentTimestamp && exitTimestamp > currentTimestamp;
     });
@@ -108,8 +105,10 @@ const App: React.FC = () => {
       
       return {
         startTime: currentPoint.time,
+        startTimestamp: currentPoint.timestamp,
         startPrice: currentPoint.price,
         endTime: endTimeStr,
+        endTimestamp: endTimeUnix,
         endPrice: currentPoint.predictionForFuture
       };
     }
@@ -125,10 +124,11 @@ const App: React.FC = () => {
 
     // 2. Generate and Process Data using Learned Parameters
     const rawData = generateMarketData(currentDate);
-    const { processedData, signals, analysis } = runPredictionAlgorithm(rawData, params);
+    const { processedData, signals, rejections, analysis } = runPredictionAlgorithm(rawData, params);
     
     setFullDayData(processedData);
     setFullDaySignals(signals);
+    setFullDayRejections(rejections);
     setFullDayStats(analysis);
     
     setPlaybackIndex(0);
@@ -284,7 +284,7 @@ const App: React.FC = () => {
           </div>
 
           <div className="lg:col-span-1">
-             <SignalLog signals={visibleSignals} />
+             <SignalLog signals={visibleSignals} rejections={visibleRejections} />
              
              <div className="mt-6 bg-blue-900/10 border border-blue-900/30 p-4 rounded-xl flex gap-3">
                <AlertCircle className="text-blue-400 shrink-0" size={20} />

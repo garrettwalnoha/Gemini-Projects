@@ -45,6 +45,16 @@ export interface TradeSignal {
   status: 'OPEN' | 'CLOSED';
 }
 
+export interface TradeRejection {
+  id: string;
+  time: string;
+  timestamp: number;
+  reason: 'EXHAUSTION' | 'TREND_FILTER' | 'LOW_CONVICTION' | 'HIGH_VOLATILITY';
+  details: string;
+  divergence: number;
+  thresholdRequired: number;
+}
+
 export interface MarketAnalysis {
   totalGain: number;
   totalTrades: number;
@@ -64,6 +74,8 @@ export interface Forecast {
   startPrice: number;
   endTime: string;
   endPrice: number;
+  startTimestamp?: number;
+  endTimestamp?: number;
 }
 
 export type PlaybackSpeed = 1 | 2 | 5 | 10 | 100; // 100 is "Instant"

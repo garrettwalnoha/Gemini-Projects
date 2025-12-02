@@ -1,5 +1,5 @@
 
-import { DataPoint, TradeSignal, SignalType, MarketAnalysis } from '../types';
+import { DataPoint, TradeSignal, SignalType, MarketAnalysis, TradeRejection } from '../types';
 import { getRealDataForDate, getPriorDaysInMonth } from './spyData';
 
 // Constants for simulation
@@ -78,13 +78,13 @@ export const trainModel = (currentDate: string): ModelParameters => {
     const dailyReturn = (day.close - day.open) / day.open;
     const dailyVol = (day.high - day.low) / day.open;
 
-    weightedReturnSum += dailyReturn * recencyWeight;
-    weightedVolSum += dailyVol * recencyWeight;
+    weightedReturnSum += (!isNaN(dailyReturn) ? dailyReturn : 0) * recencyWeight;
+    weightedVolSum += (!isNaN(dailyVol) ? dailyVol : 0) * recencyWeight;
     weightSum += recencyWeight;
   });
 
-  const avgWeightedReturn = weightedReturnSum / weightSum;
-  const avgWeightedVol = weightedVolSum / weightSum;
+  const avgWeightedReturn = weightSum > 0 ? weightedReturnSum / weightSum : 0;
+  const avgWeightedVol = weightSum > 0 ? weightedVolSum / weightSum : 0;
 
   // Determine Parameters
   // 1. Trend Bias: Enhanced with persistence check
@@ -101,7 +101,8 @@ export const trainModel = (currentDate: string): ModelParameters => {
   else if (avgWeightedVol < 0.005) baseVolatilityThreshold = 0.8; 
   
   // 3. Momentum Weight: In strong trends, trust momentum.
-  const momentumWeight = Math.abs(trendBias) > 0.2 ? 0.8 : 0.5;
+  // Boosted base momentum weight for better signal capture
+  const momentumWeight = Math.abs(trendBias) > 0.2 ? 1.5 : 1.0;
 
   let description = "";
   if (trendBias > 0.1) description = "Bullish Trend";
@@ -112,9 +113,9 @@ export const trainModel = (currentDate: string): ModelParameters => {
   description += avgWeightedVol > 0.01 ? " [High Vol]" : " [Stable]";
 
   return {
-    trendBias,
-    baseVolatilityThreshold,
-    momentumWeight,
+    trendBias: !isNaN(trendBias) ? trendBias : 0,
+    baseVolatilityThreshold: !isNaN(baseVolatilityThreshold) ? baseVolatilityThreshold : 1.0,
+    momentumWeight: !isNaN(momentumWeight) ? momentumWeight : 1.0,
     description
   };
 };
@@ -221,10 +222,10 @@ export const generateMarketData = (dateStr: string): DataPoint[] => {
 export const runPredictionAlgorithm = (
   rawData: DataPoint[], 
   modelParams: ModelParameters = DEFAULT_PARAMS
-): { processedData: DataPoint[], signals: TradeSignal[], analysis: MarketAnalysis } => {
+): { processedData: DataPoint[], signals: TradeSignal[], rejections: TradeRejection[], analysis: MarketAnalysis } => {
   
-  // ADJUSTMENT: Increased Lookback Window for better stability
-  const LOOKBACK_WINDOW = 90; // Increased from 60 to 90 minutes (1.5 hrs)
+  // ADJUSTMENT: Lookback Window for better stability
+  const LOOKBACK_WINDOW = 30; // 30 minutes
   const SMA_SMOOTHING = 5;    // Smoothing window for momentum calculation
   const PREDICTION_HORIZON = 15; 
   const VOLATILITY_WINDOW = 30;
@@ -232,22 +233,23 @@ export const runPredictionAlgorithm = (
   
   // New: Maximum duration a trade should remain open if it hasn't hit targets
   const MAX_TRADE_DURATION_MINUTES = PREDICTION_HORIZON + 5; // 20 minutes max
+  const BREAKEVE_MOVE_PCT = 0.0010; // New: Move SL to entry if PnL reaches 0.10%
 
   // Weights for our Linear Model (Start with defaults, learn as we go)
-  // Prediction = (wMomentum * Momentum) + (wObv * ObvSlope) + (wVol * VolChange) + Bias
-  // ADJUSTMENT: Increased initial momentum weight to value the longer-term signal
+  // Prediction = (wMomentum * Momentum) + (wObv * ObvSlope) + Bias
   const weights = {
-    momentum: modelParams.momentumWeight * 1.2, 
-    obv: 0.2,
-    vol: -0.1 // Usually high vol is mean reverting (negative impact on trend continuation)
+    momentum: modelParams.momentumWeight * 1.2, // Multiplier adjusted to 1.2
+    obv: 0.2, // Fixed OBV weight
+    // Removed: vol: -0.1
   };
   
   // ADAPTIVE LEARNING SETTINGS (Normalized LMS)
-  const BASE_LEARNING_RATE = 0.05; 
+  const BASE_LEARNING_RATE = 0.1; // Increased to help model adapt faster
   const EPSILON = 1e-6; // Safety factor to avoid division by zero
   
   const processedData = [...rawData];
   const signals: TradeSignal[] = [];
+  const rejections: TradeRejection[] = []; // Store reasons for missed trades
   
   // Feature History for Training
   interface FeatureVector {
@@ -255,10 +257,11 @@ export const runPredictionAlgorithm = (
     obvSlope: number;
     volChange: number;
   }
-  const featureHistory: FeatureVector[] = new Array(processedData.length).fill({ slope: 0, obvSlope: 0, volChange: 0 });
+  const featureHistory: FeatureVector[] = Array.from({ length: processedData.length }, () => ({ slope: 0, obvSlope: 0, volChange: 0 }));
 
   // 1. Calculate Indicators & Predictions loop
-  for (let i = 0; i < processedData.length; i++) {
+  // Start loop early (5 mins) to build progressive predictions
+  for (let i = 5; i < processedData.length; i++) {
     const current = processedData[i];
     const prev = processedData[i-1] || current;
 
@@ -316,22 +319,25 @@ export const runPredictionAlgorithm = (
     }
 
     // --- Online Learning & Prediction ---
-    if (i >= LOOKBACK_WINDOW) {
+    // Calculate effective lookback based on available data
+    const effectiveLookback = Math.min(i, LOOKBACK_WINDOW);
+
+    if (effectiveLookback >= 5) {
       // 1. Calculate Features
       
       // Feature A: Momentum Slope (Normalized & Smoothed)
       // Smoothing: Use SMA(5) of Current vs SMA(5) of Past to reduce single-candle noise
       let currentSma = current.price;
-      let pastSma = processedData[i - LOOKBACK_WINDOW].price;
+      let pastSma = processedData[i - effectiveLookback].price;
 
-      // Calculate simple local averages if possible
-      if (i >= SMA_SMOOTHING) {
+      // Calculate simple local averages if possible (only after first 15 mins)
+      if (i >= SMA_SMOOTHING + 15) {
           let sumCurr = 0;
           for(let k=0; k<SMA_SMOOTHING; k++) sumCurr += processedData[i-k].price;
           currentSma = sumCurr / SMA_SMOOTHING;
 
           // Check bounds for past SMA
-          const pastIndex = i - LOOKBACK_WINDOW;
+          const pastIndex = i - effectiveLookback;
           if (pastIndex >= SMA_SMOOTHING) {
              let sumPast = 0;
              for(let k=0; k<SMA_SMOOTHING; k++) sumPast += processedData[pastIndex-k].price;
@@ -339,7 +345,7 @@ export const runPredictionAlgorithm = (
           }
       }
 
-      const slopeRaw = (currentSma - pastSma) / LOOKBACK_WINDOW;
+      const slopeRaw = (currentSma - pastSma) / effectiveLookback;
       
       // Feature B: OBV Slope (Normalized by Volume MA)
       const obvStart = processedData[i - 10]?.obv || (current.obv || 0);
@@ -349,61 +355,63 @@ export const runPredictionAlgorithm = (
       let volMA = current.volumeMA || 1;
       if (volMA <= 0) volMA = 1;
       
-      const obvSlopeNorm = (obvSlopeRaw / volMA) * 100; // Scale to be comparable to price slope
+      // SCALING FIX: Removed * 100 to bring OBV magnitude inline with Price Slope (approx 0.1 - 2.0 range)
+      const obvSlopeNorm = (obvSlopeRaw / volMA) || 0; // Fallback to 0 if NaN
 
-      // Feature C: Volatility Change
-      const currentVol = current.parkinsonVolatility || 0;
-      const prevVol = processedData[i - 5]?.parkinsonVolatility || currentVol;
-      const volChange = currentVol - prevVol;
+      // Feature C: Volatility Change (REMOVED/ZEROED)
+      const volChange = 0; // Feature removed to stabilize LMS
 
       // Store features for later training
-      featureHistory[i] = { slope: slopeRaw, obvSlope: obvSlopeNorm, volChange };
+      featureHistory[i] = { slope: slopeRaw || 0, obvSlope: obvSlopeNorm, volChange };
 
       // 2. Training Step (Normalized LMS Algorithm)
       // Check prediction made 15 minutes ago to see how we did
       const trainingIndex = i - PREDICTION_HORIZON;
-      if (trainingIndex >= LOOKBACK_WINDOW) {
+      if (trainingIndex >= 5) {
          const pastFeatures = featureHistory[trainingIndex];
          const actualPriceChange = current.price - processedData[trainingIndex].price;
          
          // Reconstruct what our linear model predicted 
          const rawPred = (weights.momentum * pastFeatures.slope * PREDICTION_HORIZON) + 
-                         (weights.obv * pastFeatures.obvSlope) + 
-                         (weights.vol * pastFeatures.volChange);
+                         (weights.obv * pastFeatures.obvSlope);
          
          const error = actualPriceChange - rawPred;
 
          // Adaptive Learning Rate (NLMS)
-         // Calculate signal power (magnitude squared of input vector)
          const signalPower = (pastFeatures.slope * pastFeatures.slope) + 
-                             (pastFeatures.obvSlope * pastFeatures.obvSlope * 0.0001) + 
-                             (pastFeatures.volChange * pastFeatures.volChange * 0.0001);
+                             (pastFeatures.obvSlope * pastFeatures.obvSlope);
                              
          const adaptiveAlpha = BASE_LEARNING_RATE / (EPSILON + signalPower);
 
          // Update Weights (Gradient Descent)
-         // Limit updates to prevent explosion
          weights.momentum += adaptiveAlpha * error * pastFeatures.slope;
          weights.obv += adaptiveAlpha * error * pastFeatures.obvSlope; 
-         weights.vol += adaptiveAlpha * error * pastFeatures.volChange;
+         
+         // Clamp Weights to prevent drift to zero
+         if (weights.momentum < 0.1) weights.momentum = 0.1;
+         if (weights.obv < 0.1) weights.obv = 0.1;
       }
 
       // 3. Make Prediction
       const modelPrediction = (weights.momentum * slopeRaw * PREDICTION_HORIZON) + 
-                              (weights.obv * obvSlopeNorm) + 
-                              (weights.vol * volChange);
+                              (weights.obv * obvSlopeNorm);
                               
       // Add Regime Bias
       const regimeBias = modelParams.trendBias * 0.1;
       
       const rawFinalPrediction = current.price + modelPrediction + regimeBias;
       
-      // CRITICAL CHECK: for NaN to prevent corruption of data and charts
-      if (isNaN(rawFinalPrediction)) {
-          continue;
-      }
+      // Safety Clamp: Ensure prediction is within +/- 5% of current price to prevent chart blowout
+      let clampedPrediction = rawFinalPrediction;
+      
+      // Additional NaN safeguard for assignment
+      if (isNaN(clampedPrediction)) clampedPrediction = current.price; 
 
-      const finalPrediction = parseFloat(rawFinalPrediction.toFixed(2));
+      const maxDeviation = current.price * 0.05;
+      if (clampedPrediction > current.price + maxDeviation) clampedPrediction = current.price + maxDeviation;
+      if (clampedPrediction < current.price - maxDeviation) clampedPrediction = current.price - maxDeviation;
+
+      const finalPrediction = parseFloat(clampedPrediction.toFixed(2));
       processedData[i].predictionForFuture = finalPrediction;
 
       // VISUALIZATION MAPPING
@@ -417,11 +425,15 @@ export const runPredictionAlgorithm = (
 
   // 3. Dynamic Trading Engine with Risk Management
   
-  const BASE_ENTRY_THRESHOLD = 0.00035; // 0.035% (Adjusted for better sensitivity)
-  const MIN_EFFECTIVE_THRESHOLD = 0.00020; // 0.02% Minimum conviction required
+  // ADJUSTMENT: Aggressively lowered thresholds to initiate trades
+  const BASE_ENTRY_THRESHOLD = 0.00015; // 0.015%
+  const MIN_EFFECTIVE_THRESHOLD = 0.00001; // Virtually 0 to force trades
   
   const STOP_LOSS_PCT = 0.0015; // 0.15%
   const TAKE_PROFIT_PCT = 0.0030; // 0.30%
+  
+  // Track last rejection time to prevent spamming the logs
+  let lastRejectionTime = 0;
 
   let currentPosition: 'NONE' | 'LONG' | 'SHORT' = 'NONE';
   let activeTrade: Partial<TradeSignal> | null = null;
@@ -459,30 +471,86 @@ export const runPredictionAlgorithm = (
       // Only enter if recent move isn't already exhausted
       const isExhausted = Math.abs(recentMove) > 0.0025; // 0.25% move in 5 mins is a spike
 
+      // --- ANALYSIS & REJECTION LOGGING ---
+      // If we see a "Near Miss" (divergence > 0.005%), analyze why we didn't take it
+      if (Math.abs(divergence) > MIN_EFFECTIVE_THRESHOLD) {
+          let rejectionReason: TradeRejection['reason'] | null = null;
+          let details = "";
+          let thresholdRequired = effectiveThreshold;
+
+          // Check Exhaustion
+          if (isExhausted) {
+              rejectionReason = 'EXHAUSTION';
+              details = `Price spike of ${(recentMove * 100).toFixed(2)}% in 5m detected. Waiting for stability.`;
+          } else {
+             const momentumSlope = currentFeatures?.slope || 0;
+             let thresholdLong = effectiveThreshold;
+             let thresholdShort = effectiveThreshold;
+
+             // Trend Bias
+             const biasImpact = Math.max(-0.25, Math.min(0.25, modelParams.trendBias * 0.3));
+             thresholdLong = thresholdLong * (1 - biasImpact);
+             thresholdShort = thresholdShort * (1 + biasImpact);
+
+             // 2. Intraday Trend Alignment (Tactical)
+             // Softened Penalty: Allow model to fight the trend more easily.
+             if (momentumSlope < -0.02) thresholdLong *= 1.15; // Updated to 1.15
+             if (momentumSlope < -0.05) thresholdLong *= 1.1; 
+             if (momentumSlope > 0.02) thresholdShort *= 1.15; // Updated to 1.15
+             if (momentumSlope > 0.05) thresholdShort *= 1.1; 
+             
+             // Check if we failed the "Trend Fighting" filter
+             if (divergence > 0 && divergence < thresholdLong && divergence > initialThreshold) {
+                  rejectionReason = 'TREND_FILTER';
+                  details = `Long signal (+${(divergence*100).toFixed(3)}%) too weak to fight negative momentum (${momentumSlope.toFixed(4)}). Req: ${(thresholdLong*100).toFixed(3)}%`;
+                  thresholdRequired = thresholdLong;
+             } else if (divergence < 0 && Math.abs(divergence) < thresholdShort && Math.abs(divergence) > initialThreshold) {
+                  rejectionReason = 'TREND_FILTER';
+                  details = `Short signal (${(divergence*100).toFixed(3)}%) too weak to fight positive momentum (${momentumSlope.toFixed(4)}). Req: ${(thresholdShort*100).toFixed(3)}%`;
+                  thresholdRequired = thresholdShort;
+             } 
+             // Check if we failed just because of Volatility Clamping / Base Threshold
+             else if (Math.abs(divergence) < effectiveThreshold) {
+                  rejectionReason = 'LOW_CONVICTION';
+                  details = `Divergence ${(divergence*100).toFixed(3)}% below dynamic threshold ${(effectiveThreshold*100).toFixed(3)}% (Vol Mult: ${volMultiplier.toFixed(1)}x)`;
+             }
+          }
+
+          if (rejectionReason) {
+              // Rate limit logging to avoid spam, unless it's a new type of rejection or significant time passed (15 mins)
+              if (i - lastRejectionTime > 15 || rejectionReason === 'TREND_FILTER' || rejectionReason === 'EXHAUSTION') {
+                   rejections.push({
+                       id: `REJ-${i}`,
+                       time: point.time,
+                       timestamp: point.timestamp,
+                       reason: rejectionReason,
+                       details,
+                       divergence,
+                       thresholdRequired
+                   });
+                   lastRejectionTime = i;
+              }
+          }
+      }
+
       if (!isExhausted) {
         const momentumSlope = currentFeatures?.slope || 0;
         
-        // Base thresholds
         let thresholdLong = effectiveThreshold;
         let thresholdShort = effectiveThreshold;
 
         // 1. Daily Regime Bias (Strategic)
-        // If daily trend is Bullish, it's easier to go Long, harder to go Short
         const biasImpact = Math.max(-0.25, Math.min(0.25, modelParams.trendBias * 0.3));
         thresholdLong = thresholdLong * (1 - biasImpact);
         thresholdShort = thresholdShort * (1 + biasImpact);
 
         // 2. Intraday Trend Alignment (Tactical)
-        // If the divergence suggests LONG but the underlying momentum slope is Negative, 
-        // we are "Fighting the Trend". Require higher conviction (higher threshold).
-        
-        // Fighting Downtrend? Increase threshold
-        if (momentumSlope < -0.02) thresholdLong *= 1.3; 
-        if (momentumSlope < -0.05) thresholdLong *= 1.2; // Cumulative penalty for steep drops
+        // Softened Penalty: Allow model to fight the trend more easily.
+        if (momentumSlope < -0.02) thresholdLong *= 1.15; // Updated to 1.15
+        if (momentumSlope < -0.05) thresholdLong *= 1.1; 
 
-        // Fighting Uptrend? Increase threshold
-        if (momentumSlope > 0.02) thresholdShort *= 1.3;
-        if (momentumSlope > 0.05) thresholdShort *= 1.2;
+        if (momentumSlope > 0.02) thresholdShort *= 1.15; // Updated to 1.15
+        if (momentumSlope > 0.05) thresholdShort *= 1.1; 
 
         if (divergence > thresholdLong) {
           // OPEN LONG
@@ -520,6 +588,22 @@ export const runPredictionAlgorithm = (
     else if (currentPosition !== 'NONE' && activeTrade) {
       let shouldExit = false;
       let exitReason: TradeSignal['exitReason'] = undefined;
+
+      // 0. Breakeven Stop Loss Check (New)
+      if (activeTrade.status === 'OPEN' && activeTrade.priceAtSignal) {
+          const profitPct = currentPosition === 'LONG' 
+              ? (point.price - activeTrade.priceAtSignal) / activeTrade.priceAtSignal 
+              : (activeTrade.priceAtSignal - point.price) / activeTrade.priceAtSignal;
+
+          if (profitPct >= BREAKEVE_MOVE_PCT) {
+              // Move SL to entry price only if it's currently worse than entry
+              if (currentPosition === 'LONG' && activeTrade.stopLossPrice! < activeTrade.priceAtSignal) {
+                  activeTrade.stopLossPrice = activeTrade.priceAtSignal; 
+              } else if (currentPosition === 'SHORT' && activeTrade.stopLossPrice! > activeTrade.priceAtSignal) {
+                  activeTrade.stopLossPrice = activeTrade.priceAtSignal;
+              }
+          }
+      }
 
       // 1. Risk Management Checks (Priority)
       if (currentPosition === 'LONG') {
@@ -625,5 +709,5 @@ export const runPredictionAlgorithm = (
     winRate: totalTrades > 0 ? winningTrades / totalTrades : 0
   };
 
-  return { processedData, signals, analysis };
+  return { processedData, signals, rejections, analysis };
 };
