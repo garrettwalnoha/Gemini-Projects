@@ -84,3 +84,7 @@ export interface Forecast {
 }
 
 export type PlaybackSpeed = 1 | 2 | 5 | 10 | 100; // 100 is "Instant"
+
+export type DataSourceMode = 'SIMULATION' | 'LIVE';
+
+export type ConnectionStatus = 'DISCONNECTED' | 'CONNECTING' | 'CONNECTED' | 'ERROR';

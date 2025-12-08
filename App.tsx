@@ -1,8 +1,9 @@
 
-import React, { useEffect, useState, useRef } from 'react';
+import React, { useEffect, useState, useRef, useCallback } from 'react';
 import { generateMarketData, runPredictionAlgorithm, trainModel } from './services/marketSimulator';
 import { getGeminiAnalysis } from './services/geminiService';
-import { DataPoint, TradeSignal, MarketAnalysis, PlaybackSpeed, Forecast, TradeRejection, ChartDataPoint } from './types';
+import { getWebSocketService } from './services/websocketService';
+import { DataPoint, TradeSignal, MarketAnalysis, PlaybackSpeed, Forecast, TradeRejection, ChartDataPoint, DataSourceMode, ConnectionStatus } from './types';
 import StockChart from './components/StockChart';
 import MetricsDashboard from './components/MetricsDashboard';
 import SignalLog from './components/SignalLog';
@@ -25,6 +26,10 @@ const App: React.FC = () => {
   const [playbackIndex, setPlaybackIndex] = useState<number>(0); 
   const [isPlaying, setIsPlaying] = useState<boolean>(false);
   const [speed, setSpeed] = useState<PlaybackSpeed>(1);
+
+  // --- Live Data State ---
+  const [dataSource, setDataSource] = useState<DataSourceMode>('SIMULATION');
+  const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>('DISCONNECTED');
   
   // --- AI State ---
   const [aiReport, setAiReport] = useState<string>("");
@@ -136,29 +141,63 @@ const App: React.FC = () => {
 
   // --- Simulation Logic ---
 
+  // Initial Load & Mode Switching
   useEffect(() => {
-    // 1. Train the model on prior days in the month
     const params = trainModel(currentDate);
     setModelParams(params);
 
-    // 2. Generate and Process Data using Learned Parameters
-    const rawData = generateMarketData(currentDate);
-    const { processedData, signals, rejections, analysis } = runPredictionAlgorithm(rawData, params);
-    
-    setFullDayData(processedData);
-    setFullDaySignals(signals);
-    setFullDayRejections(rejections);
-    setFullDayStats(analysis);
-    
-    setPlaybackIndex(0);
-    setIsPlaying(false);
-    setAiReport("");
-  }, [currentDate]);
+    if (dataSource === 'SIMULATION') {
+      // 2. Generate and Process Data using Learned Parameters
+      const rawData = generateMarketData(currentDate);
+      const { processedData, signals, rejections, analysis } = runPredictionAlgorithm(rawData, params);
+      
+      setFullDayData(processedData);
+      setFullDaySignals(signals);
+      setFullDayRejections(rejections);
+      setFullDayStats(analysis);
+      setPlaybackIndex(0);
+      setIsPlaying(false);
+      setAiReport("");
+    } else {
+      // LIVE MODE INITIALIZATION
+      setFullDayData([]);
+      setFullDaySignals([]);
+      setFullDayRejections([]);
+      setFullDayStats(null);
+      setPlaybackIndex(0);
+      setAiReport("");
+      // Start WS connection
+      const ws = getWebSocketService();
+      setConnectionStatus('CONNECTING');
+      
+      ws.connect((dataPoint) => {
+         setConnectionStatus('CONNECTED');
+         // On new data point:
+         setFullDayData(prev => {
+             const newData = [...prev, dataPoint];
+             // Re-run algo incrementally
+             // Note: In a production app, we'd optimize this to not re-run full history every tick
+             const { processedData, signals, rejections, analysis } = runPredictionAlgorithm(newData, params);
+             setFullDaySignals(signals);
+             setFullDayRejections(rejections);
+             setFullDayStats(analysis);
+             setPlaybackIndex(newData.length - 1); // Auto-scroll to latest
+             return processedData;
+         });
+      });
 
+      return () => {
+         ws.disconnect();
+         setConnectionStatus('DISCONNECTED');
+      }
+    }
+  }, [currentDate, dataSource]);
+
+  // Playback Interval (Simulation Only)
   useEffect(() => {
     let interval: ReturnType<typeof setInterval>;
 
-    if (isPlaying && playbackIndex < fullDayData.length - 1) {
+    if (dataSource === 'SIMULATION' && isPlaying && playbackIndex < fullDayData.length - 1) {
       const msPerTick = speed === 100 ? 10 : 1000 / speed; 
       
       interval = setInterval(() => {
@@ -173,13 +212,13 @@ const App: React.FC = () => {
     }
 
     return () => clearInterval(interval);
-  }, [isPlaying, speed, fullDayData.length, playbackIndex]);
+  }, [isPlaying, speed, fullDayData.length, playbackIndex, dataSource]);
 
   useEffect(() => {
-    if (playbackIndex === fullDayData.length - 1 && fullDayData.length > 0 && !aiReport && !isLoadingAi) {
+    if (dataSource === 'SIMULATION' && playbackIndex === fullDayData.length - 1 && fullDayData.length > 0 && !aiReport && !isLoadingAi) {
       fetchAiAnalysis(fullDayStats!, fullDaySignals);
     }
-  }, [playbackIndex, fullDayData.length]);
+  }, [playbackIndex, fullDayData.length, dataSource]);
 
   const fetchAiAnalysis = async (analysis: MarketAnalysis, recentSignals: TradeSignal[]) => {
     setIsLoadingAi(true);
@@ -191,6 +230,10 @@ const App: React.FC = () => {
   const handleSeek = (val: number) => {
     const newIndex = Math.min(Math.max(0, val), fullDayData.length - 1);
     setPlaybackIndex(newIndex);
+  };
+
+  const toggleDataSource = () => {
+    setDataSource(prev => prev === 'SIMULATION' ? 'LIVE' : 'SIMULATION');
   };
 
   return (
@@ -219,6 +262,9 @@ const App: React.FC = () => {
           progress={playbackIndex}
           onSeek={handleSeek}
           currentTime={visibleData[visibleData.length - 1]?.time || "09:30"}
+          dataSource={dataSource}
+          onToggleDataSource={toggleDataSource}
+          connectionStatus={connectionStatus}
         />
 
         {/* Adaptive Model Status Bar */}
@@ -267,6 +313,7 @@ const App: React.FC = () => {
               signals={visibleSignals} 
               forecast={currentForecast}
               activeTrade={currentActiveTrade}
+              fullDayDomain={dataSource === 'SIMULATION'} // Dynamic domain for Live Mode
             />
             
             <div className="bg-gray-850 border border-gray-700 rounded-xl p-6 relative overflow-hidden min-h-[200px]">
@@ -280,7 +327,12 @@ const App: React.FC = () => {
                   End-of-Day AI Analyst Report
                 </h3>
                 
-                {playbackIndex < fullDayData.length - 1 ? (
+                {dataSource === 'LIVE' ? (
+                   <div className="text-blue-400 italic text-sm border-l-2 border-blue-500 pl-4 flex items-center gap-2">
+                     <AlertCircle size={16} />
+                     Live Analysis updates as session data completes.
+                   </div>
+                ) : playbackIndex < fullDayData.length - 1 ? (
                   <div className="text-gray-500 italic text-sm border-l-2 border-gray-700 pl-4">
                     Analysis will generate automatically when the trading session completes (16:00).
                   </div>
@@ -308,10 +360,12 @@ const App: React.FC = () => {
              <div className="mt-6 bg-blue-900/10 border border-blue-900/30 p-4 rounded-xl flex gap-3">
                <AlertCircle className="text-blue-400 shrink-0" size={20} />
                <div className="text-xs text-blue-200/80">
-                 <strong>Simulation Mode:</strong>
-                 {currentDate.startsWith('2025') 
-                    ? " Showing Projected SPY performance for November 2025 (Hypothetical Scenarios)."
-                    : ` Showing SPY close data for ${currentDate}.`
+                 <strong>{dataSource === 'LIVE' ? 'Live Mode Active:' : 'Simulation Mode:'}</strong>
+                 {dataSource === 'LIVE' 
+                    ? " Connected to real-time data stream (Simulated Mock Socket for demo). Model updates predictions every tick."
+                    : currentDate.startsWith('2025') 
+                       ? " Showing Projected SPY performance for November 2025 (Hypothetical Scenarios)."
+                       : ` Showing SPY close data for ${currentDate}.`
                  }
                  <br/><br/>
                  <strong>Online Learning (LMS):</strong> The prediction engine uses Least Mean Squares to adjust model weights (Momentum, OBV, Volatility) every minute based on prediction errors.
